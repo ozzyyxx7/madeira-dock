@@ -8,6 +8,7 @@
 #include "scm.h"
 #include "validation.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
@@ -86,6 +87,22 @@ static bool wide_flag(const wchar_t *name, wchar_t expected)
 {
     wchar_t value[4] = {0};
     return GetEnvironmentVariableW(name, value, 4) == 1 && value[0] == expected;
+}
+
+/* Only a Source language choice supplied by Madeira is accepted. The value
+ * reaches Valve's LaunchApp as an extra command line; no arbitrary arguments
+ * from the environment are passed to a game. */
+static const char *source_language_option(void)
+{
+    const char *value = getenv("MADEIRA_STEAM_HOST_LAUNCH_ARGS");
+    if (!value || !*value) return "";
+    if (strncmp(value, "-language ", 10)) return NULL;
+    const char *code = value + 10;
+    size_t length = strlen(code);
+    if (!length || length > 32) return NULL;
+    for (size_t i = 0; i < length; ++i)
+        if (code[i] < 'a' || code[i] > 'z') return NULL;
+    return value;
 }
 
 /* Returns 0 once every started job reported success, otherwise 49 (or 12
@@ -191,6 +208,12 @@ int sh_launch(HMODULE module, void *engine, void *client_user,
         return 41;
     }
     o->event("launch-install-directory-verified", 1);
+    const char *launch_args = source_language_option();
+    if (!launch_args) {
+        o->event("launch-arguments-invalid", 1);
+        return 41;
+    }
+    o->event("launch-language-option", *launch_args != 0);
     HKEY active = NULL, machine = NULL;
     int result = 42;
     struct saved_value values[3] = {0};
@@ -230,7 +253,7 @@ int sh_launch(HMODULE module, void *engine, void *client_user,
     o->event("launch-client-discovery-published", 1);
     SetConsoleCtrlHandler(on_control, TRUE);
     uint64_t gameid = appid;
-    uint64_t call = ((launch_fn)(*(void ***)manager)[2])(manager, &gameid, 0, 0, "");
+    uint64_t call = ((launch_fn)(*(void ***)manager)[2])(manager, &gameid, 0, 0, launch_args);
     o->event("launch-request-submitted", call != 0);
     if (!call) { result = 43; goto done; }
     uint64_t begin = o->now_ms(), stopped_at = 0;
@@ -356,7 +379,7 @@ int sh_launch(HMODULE module, void *engine, void *client_user,
         }
         if (retry_at && !seen_running && o->now_ms() >= retry_at) {
             retry_at = 0;
-            call = ((launch_fn)(*(void ***)manager)[2])(manager, &gameid, 0, 0, "");
+            call = ((launch_fn)(*(void ***)manager)[2])(manager, &gameid, 0, 0, launch_args);
             ++retries;
             if (retries <= 3 || retries % 60 == 0) o->event("launch-update-retry", (int32_t)retries);
             if (!call) { result = 43; goto done; }
